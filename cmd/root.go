@@ -9,6 +9,7 @@ import (
 
 	"github.com/3nrikas/ignorewhy/internal/dockercheck"
 	"github.com/3nrikas/ignorewhy/internal/gitcheck"
+	"github.com/3nrikas/ignorewhy/internal/npmcheck"
 )
 
 const Version = "dev"
@@ -52,8 +53,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	npmResult, err := npmcheck.New().Check(ctx, gitResult.Root, dir, flags.Arg(0))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
 
-	printResults(stdout, gitResult, dockerResult)
+	printResults(stdout, gitResult, dockerResult, npmResult)
 	return 0
 }
 
@@ -63,13 +69,26 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "       ignorewhy --version")
 }
 
-func printResults(w io.Writer, gitResult gitcheck.Result, dockerResult dockercheck.Result) {
+func printResults(w io.Writer, gitResult gitcheck.Result, dockerResult dockercheck.Result, npmResult npmcheck.Result) {
 	fmt.Fprintf(w, "%s\n\n", gitResult.Path)
 	printGit(w, gitResult)
 	fmt.Fprintln(w)
 	printDocker(w, dockerResult)
-	if gitResult.Status == gitcheck.StatusIgnored && dockerResult.Status == dockercheck.StatusIncluded {
+	fmt.Fprintln(w)
+	printNPM(w, npmResult)
+
+	if gitResult.Status != gitcheck.StatusIgnored {
+		return
+	}
+	dockerIncluded := dockerResult.Status == dockercheck.StatusIncluded
+	npmIncluded := npmResult.Status == npmcheck.StatusIncluded
+	switch {
+	case dockerIncluded && npmIncluded:
+		fmt.Fprintln(w, "\nwarning: ignored by Git but included in Docker build context and npm package")
+	case dockerIncluded:
 		fmt.Fprintln(w, "\nwarning: ignored by Git but included in Docker build context")
+	case npmIncluded:
+		fmt.Fprintln(w, "\nwarning: ignored by Git but included in npm package")
 	}
 }
 
@@ -100,4 +119,9 @@ func printDocker(w io.Writer, result dockercheck.Result) {
 		return
 	}
 	fmt.Fprintln(w, "  no matching ignore rule")
+}
+
+func printNPM(w io.Writer, result npmcheck.Result) {
+	fmt.Fprintf(w, "npm\n  %s\n", result.Status)
+	fmt.Fprintf(w, "  %s\n", result.Reason)
 }
