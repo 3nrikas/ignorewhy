@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/3nrikas/ignorewhy/internal/dockercheck"
 	"github.com/3nrikas/ignorewhy/internal/gitcheck"
 )
 
@@ -41,13 +42,18 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: get working directory: %v\n", err)
 		return 1
 	}
-	result, err := gitcheck.New().Check(ctx, dir, flags.Arg(0))
+	gitResult, err := gitcheck.New().Check(ctx, dir, flags.Arg(0))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	dockerResult, err := dockercheck.Check(gitResult.Root, dir, flags.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	printResult(stdout, result)
+	printResults(stdout, gitResult, dockerResult)
 	return 0
 }
 
@@ -57,8 +63,18 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "       ignorewhy --version")
 }
 
-func printResult(w io.Writer, result gitcheck.Result) {
-	fmt.Fprintf(w, "%s\n\nGit\n  %s\n", result.Path, result.Status)
+func printResults(w io.Writer, gitResult gitcheck.Result, dockerResult dockercheck.Result) {
+	fmt.Fprintf(w, "%s\n\n", gitResult.Path)
+	printGit(w, gitResult)
+	fmt.Fprintln(w)
+	printDocker(w, dockerResult)
+	if gitResult.Status == gitcheck.StatusIgnored && dockerResult.Status == dockercheck.StatusIncluded {
+		fmt.Fprintln(w, "\nwarning: ignored by Git but included in Docker build context")
+	}
+}
+
+func printGit(w io.Writer, result gitcheck.Result) {
+	fmt.Fprintf(w, "Git\n  %s\n", result.Status)
 
 	if result.Rule != nil {
 		if result.Status == gitcheck.StatusTracked && !result.Rule.Negated {
@@ -72,6 +88,15 @@ func printResult(w io.Writer, result gitcheck.Result) {
 
 	if result.Status == gitcheck.StatusTracked {
 		fmt.Fprintln(w, "  tracked by Git")
+		return
+	}
+	fmt.Fprintln(w, "  no matching ignore rule")
+}
+
+func printDocker(w io.Writer, result dockercheck.Result) {
+	fmt.Fprintf(w, "Docker\n  %s\n", result.Status)
+	if result.Rule != nil {
+		fmt.Fprintf(w, "  %s:%d -> %s\n", result.Rule.Source, result.Rule.Line, result.Rule.Pattern)
 		return
 	}
 	fmt.Fprintln(w, "  no matching ignore rule")
