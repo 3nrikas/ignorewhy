@@ -54,6 +54,8 @@ Run it from anywhere inside a Git repository:
 ignorewhy scan
 ignorewhy scan --json
 ignorewhy scan --ci
+ignorewhy scan --sensitive
+ignorewhy scan --large
 ignorewhy path/to/file
 ignorewhy --help
 ignorewhy --version
@@ -63,6 +65,10 @@ ignorewhy --version
 returns exit code 3 when findings are present; operational errors return 1 and
 invalid command usage returns 2. Plain `scan` remains informational and returns
 success even when it finds mismatches.
+
+`scan --sensitive` finds shipped paths with names such as `.env`, `*.pem`, and
+`dump.sql` without reading file contents. `scan --large` finds shipped files of
+10 MiB or more. Both flags can be combined with `--json` and `--ci`.
 
 <img src="assets/features.png" height="64" alt="Features">
 
@@ -75,6 +81,7 @@ success even when it finds mismatches.
 - Disables npm lifecycle scripts and runs npm analysis offline.
 - Scans a repository for cross-context mismatches in one command.
 - Provides deterministic JSON output and a CI failure mode.
+- Optionally finds sensitive-looking paths and large shipped files.
 - Detects files ignored by Git but included by Docker or npm.
 - Works locally without a Docker daemon, account, or telemetry.
 
