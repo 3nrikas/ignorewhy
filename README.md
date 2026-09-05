@@ -49,6 +49,7 @@ Git and Docker checks still work.
 Run it from anywhere inside a Git repository:
 
 ```sh
+ignorewhy scan
 ignorewhy path/to/file
 ignorewhy --help
 ignorewhy --version
@@ -63,6 +64,7 @@ ignorewhy --version
 - Supports `Dockerfile.dockerignore` for the default Dockerfile.
 - Uses `npm pack` to follow real npm package inclusion rules.
 - Disables npm lifecycle scripts and runs npm analysis offline.
+- Scans a repository for cross-context mismatches in one command.
 - Detects files ignored by Git but included by Docker or npm.
 - Works locally without a Docker daemon, account, or telemetry.
 
@@ -74,9 +76,8 @@ ignorewhy --version
 | Docker | Moby's `patternmatcher` |
 | npm | `npm pack --dry-run --ignore-scripts --offline` |
 
-The current version analyzes one path at a time. The Git repository root is
-used as the Docker build context and as the root npm package. npm workspaces and
-custom Docker build contexts are not supported yet.
+The Git repository root is used as the Docker build context and as the root npm
+package. npm workspaces and custom Docker build contexts are not supported yet.
 
 ## License
 

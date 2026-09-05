@@ -10,6 +10,7 @@ import (
 	"github.com/3nrikas/ignorewhy/internal/dockercheck"
 	"github.com/3nrikas/ignorewhy/internal/gitcheck"
 	"github.com/3nrikas/ignorewhy/internal/npmcheck"
+	"github.com/3nrikas/ignorewhy/internal/scan"
 )
 
 const Version = "dev"
@@ -43,17 +44,24 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: get working directory: %v\n", err)
 		return 1
 	}
-	gitResult, err := gitcheck.New().Check(ctx, dir, flags.Arg(0))
+	if flags.Arg(0) == "scan" {
+		return runScan(ctx, dir, stdout, stderr)
+	}
+	return runPath(ctx, dir, flags.Arg(0), stdout, stderr)
+}
+
+func runPath(ctx context.Context, dir, path string, stdout, stderr io.Writer) int {
+	gitResult, err := gitcheck.New().Check(ctx, dir, path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	dockerResult, err := dockercheck.Check(gitResult.Root, dir, flags.Arg(0))
+	dockerResult, err := dockercheck.Check(gitResult.Root, dir, path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	npmResult, err := npmcheck.New().Check(ctx, gitResult.Root, dir, flags.Arg(0))
+	npmResult, err := npmcheck.New().Check(ctx, gitResult.Root, dir, path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -63,10 +71,43 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runScan(ctx context.Context, dir string, stdout, stderr io.Writer) int {
+	result, err := scan.Run(ctx, dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	printScan(stdout, result)
+	return 0
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: ignorewhy <path>")
+	fmt.Fprintln(w, "       ignorewhy scan")
 	fmt.Fprintln(w, "       ignorewhy --help")
 	fmt.Fprintln(w, "       ignorewhy --version")
+}
+
+func printScan(w io.Writer, result scan.Result) {
+	fmt.Fprintf(w, "Scanned %d %s\n", result.Files, noun(result.Files, "file", "files"))
+	if len(result.Findings) == 0 {
+		fmt.Fprintln(w, "No mismatches found")
+		return
+	}
+	fmt.Fprintf(w, "Found %d %s\n", len(result.Findings), noun(len(result.Findings), "mismatch", "mismatches"))
+	for _, finding := range result.Findings {
+		fmt.Fprintf(w, "\n%s\n", finding.Path)
+		fmt.Fprintf(w, "  %-8s %s\n", "Git", finding.Git.Status)
+		fmt.Fprintf(w, "  %-8s %s\n", "Docker", finding.Docker.Status)
+		fmt.Fprintf(w, "  %-8s %s\n", "npm", finding.NPM.Status)
+	}
+}
+
+func noun(count int, singular, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
 }
 
 func printResults(w io.Writer, gitResult gitcheck.Result, dockerResult dockercheck.Result, npmResult npmcheck.Result) {
