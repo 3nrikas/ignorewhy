@@ -79,6 +79,8 @@ func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	jsonOutput := flags.Bool("json", false, "write JSON output")
 	ci := flags.Bool("ci", false, "exit 3 when findings are found")
+	sensitive := flags.Bool("sensitive", false, "find sensitive-looking paths")
+	large := flags.Bool("large", false, "find files at least 10 MiB")
 	help := flags.Bool("help", false, "show help")
 	flags.Usage = func() { printScanUsage(stderr) }
 	if err := flags.Parse(args); err != nil {
@@ -99,7 +101,10 @@ func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: get working directory: %v\n", err)
 		return 1
 	}
-	result, err := scan.Run(ctx, dir)
+	result, err := scan.RunWithOptions(ctx, dir, scan.Options{
+		Sensitive: *sensitive,
+		Large:     *large,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -110,7 +115,7 @@ func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	} else {
-		printScan(stdout, result)
+		printScan(stdout, result, *sensitive || *large)
 	}
 	if *ci && len(result.Findings) != 0 {
 		return exitFindings
@@ -120,28 +125,55 @@ func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: ignorewhy <path>")
-	fmt.Fprintln(w, "       ignorewhy scan [--json] [--ci]")
+	fmt.Fprintln(w, "       ignorewhy scan [--json] [--ci] [--sensitive] [--large]")
 	fmt.Fprintln(w, "       ignorewhy --help")
 	fmt.Fprintln(w, "       ignorewhy --version")
 }
 
 func printScanUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: ignorewhy scan [--json] [--ci]")
+	fmt.Fprintln(w, "Usage: ignorewhy scan [--json] [--ci] [--sensitive] [--large]")
 }
 
-func printScan(w io.Writer, result scan.Result) {
+func printScan(w io.Writer, result scan.Result, extended bool) {
 	fmt.Fprintf(w, "Scanned %d %s\n", result.Files, noun(result.Files, "file", "files"))
 	if len(result.Findings) == 0 {
-		fmt.Fprintln(w, "No mismatches found")
+		if extended {
+			fmt.Fprintln(w, "No findings")
+		} else {
+			fmt.Fprintln(w, "No mismatches found")
+		}
 		return
 	}
-	fmt.Fprintf(w, "Found %d %s\n", len(result.Findings), noun(len(result.Findings), "mismatch", "mismatches"))
+	label := noun(len(result.Findings), "mismatch", "mismatches")
+	if extended {
+		label = noun(len(result.Findings), "finding", "findings")
+	}
+	fmt.Fprintf(w, "Found %d %s\n", len(result.Findings), label)
 	for _, finding := range result.Findings {
 		fmt.Fprintf(w, "\n%s\n", finding.Path)
 		fmt.Fprintf(w, "  %-8s %s\n", "Git", finding.Git.Status)
 		fmt.Fprintf(w, "  %-8s %s\n", "Docker", finding.Docker.Status)
 		fmt.Fprintf(w, "  %-8s %s\n", "npm", finding.NPM.Status)
+		if finding.SensitivePattern != "" {
+			fmt.Fprintf(w, "  %-8s %s\n", "Sensitive", finding.SensitivePattern)
+		}
+		if hasReason(finding.Reasons, scan.ReasonLargeFile) {
+			fmt.Fprintf(w, "  %-8s %s\n", "Size", formatSize(finding.Size))
+		}
 	}
+}
+
+func hasReason(reasons []scan.Reason, want scan.Reason) bool {
+	for _, reason := range reasons {
+		if reason == want {
+			return true
+		}
+	}
+	return false
+}
+
+func formatSize(size int64) string {
+	return fmt.Sprintf("%.1f MiB", float64(size)/(1<<20))
 }
 
 func noun(count int, singular, plural string) string {

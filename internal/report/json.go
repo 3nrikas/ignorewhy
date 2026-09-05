@@ -20,10 +20,13 @@ type scanReport struct {
 }
 
 type finding struct {
-	Path   string  `json:"path"`
-	Git    context `json:"git"`
-	Docker context `json:"docker"`
-	NPM    context `json:"npm"`
+	Path             string        `json:"path"`
+	SizeBytes        int64         `json:"size_bytes"`
+	Reasons          []scan.Reason `json:"reasons"`
+	SensitivePattern string        `json:"sensitive_pattern,omitempty"`
+	Git              context       `json:"git"`
+	Docker           context       `json:"docker"`
+	NPM              context       `json:"npm"`
 }
 
 type context struct {
@@ -49,10 +52,13 @@ func WriteJSON(w io.Writer, result scan.Result) error {
 	}
 	for i, item := range result.Findings {
 		report.Findings[i] = finding{
-			Path:   item.Path,
-			Git:    gitContext(item.Git),
-			Docker: dockerContext(item.Docker),
-			NPM:    context{Status: string(item.NPM.Status), Reason: item.NPM.Reason},
+			Path:             item.Path,
+			SizeBytes:        item.Size,
+			Reasons:          item.Reasons,
+			SensitivePattern: item.SensitivePattern,
+			Git:              gitContext(item.Git),
+			Docker:           dockerContext(item.Docker),
+			NPM:              context{Status: string(item.NPM.Status), Reason: item.NPM.Reason},
 		}
 	}
 
