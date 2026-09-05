@@ -22,21 +22,37 @@ const (
 	StatusUnavailable   Status = "UNAVAILABLE"
 )
 
-type Result struct {
+type PackageResult struct {
 	Root   string
+	Name   string
 	Status Status
 	Reason string
+}
+
+type Result struct {
+	Root     string
+	Status   Status
+	Reason   string
+	Packages []PackageResult
 }
 
 type Checker struct {
 	command string
 }
 
+type Packages struct {
+	root     string
+	status   Status
+	reason   string
+	packages []Package
+}
+
 type Package struct {
 	root   string
+	rel    string
+	name   string
 	status Status
 	reason string
-	files  []packFile
 	paths  map[string]struct{}
 }
 
@@ -61,13 +77,11 @@ func (c Checker) Check(ctx context.Context, root, dir, path string) (Result, err
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve working directory: %w", err)
 	}
-
 	full := path
 	if !filepath.IsAbs(full) {
 		full = filepath.Join(dir, full)
 	}
-	full = filepath.Clean(full)
-	rel, err := filepath.Rel(root, full)
+	rel, err := filepath.Rel(root, filepath.Clean(full))
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve path relative to npm package: %w", err)
 	}
@@ -75,18 +89,77 @@ func (c Checker) Check(ctx context.Context, root, dir, path string) (Result, err
 		return Result{}, fmt.Errorf("path %q is outside npm package %q", path, root)
 	}
 
-	pack, err := c.Load(ctx, root)
+	packages, err := c.LoadAll(ctx, root)
 	if err != nil {
 		return Result{}, err
 	}
-	if pack.status != "" {
-		return pack.result(pack.status, pack.reason), nil
-	}
-	included, err := contains(root, full, pack.files)
+	return packages.CheckPath(filepath.ToSlash(rel))
+}
+
+func (c Checker) LoadAll(ctx context.Context, root string) (Packages, error) {
+	root, err := filepath.Abs(root)
 	if err != nil {
-		return Result{}, err
+		return Packages{}, fmt.Errorf("resolve npm package root: %w", err)
 	}
-	return pack.inclusionResult(included), nil
+	set := Packages{root: root}
+	rootManifest, err := readManifest(root)
+	if errors.Is(err, os.ErrNotExist) {
+		set.status = StatusNotApplicable
+		set.reason = "no package.json"
+		return set, nil
+	}
+	if err != nil {
+		if !invalidManifest(err) {
+			return Packages{}, fmt.Errorf("read npm package.json: %w", err)
+		}
+		set.packages = []Package{{
+			root:   root,
+			rel:    ".",
+			status: StatusUnavailable,
+			reason: "invalid package.json",
+		}}
+		return set, nil
+	}
+
+	patterns, err := workspacePatterns(rootManifest.Workspaces)
+	if err != nil {
+		return Packages{}, fmt.Errorf("read npm workspaces: %w", err)
+	}
+	dirs, err := workspaceDirs(root, patterns)
+	if err != nil {
+		return Packages{}, err
+	}
+	set.packages = make([]Package, 0, len(dirs)+1)
+	rootPackage, err := c.loadPackage(ctx, root, ".", rootManifest)
+	if err != nil {
+		return Packages{}, err
+	}
+	set.packages = append(set.packages, rootPackage)
+	for _, dir := range dirs {
+		rel, err := filepath.Rel(root, dir)
+		if err != nil {
+			return Packages{}, fmt.Errorf("resolve npm workspace path: %w", err)
+		}
+		workspaceManifest, err := readManifest(dir)
+		if err != nil {
+			if !invalidManifest(err) {
+				return Packages{}, fmt.Errorf("read npm workspace %s/package.json: %w", filepath.ToSlash(rel), err)
+			}
+			set.packages = append(set.packages, Package{
+				root:   dir,
+				rel:    filepath.ToSlash(rel),
+				status: StatusUnavailable,
+				reason: "invalid package.json",
+			})
+			continue
+		}
+		workspace, err := c.loadPackage(ctx, dir, filepath.ToSlash(rel), workspaceManifest)
+		if err != nil {
+			return Packages{}, err
+		}
+		set.packages = append(set.packages, workspace)
+	}
+	return set, nil
 }
 
 func (c Checker) Load(ctx context.Context, root string) (Package, error) {
@@ -94,59 +167,95 @@ func (c Checker) Load(ctx context.Context, root string) (Package, error) {
 	if err != nil {
 		return Package{}, fmt.Errorf("resolve npm package root: %w", err)
 	}
-	pack := Package{root: root}
-	if _, err := os.Stat(filepath.Join(root, "package.json")); errors.Is(err, os.ErrNotExist) {
-		pack.status = StatusNotApplicable
-		pack.reason = "no package.json"
-		return pack, nil
-	} else if err != nil {
-		return Package{}, fmt.Errorf("read package.json: %w", err)
+	value, err := readManifest(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return Package{root: root, rel: ".", status: StatusNotApplicable, reason: "no package.json"}, nil
 	}
+	if err != nil {
+		if !invalidManifest(err) {
+			return Package{}, fmt.Errorf("read npm package.json: %w", err)
+		}
+		return Package{root: root, rel: ".", status: StatusUnavailable, reason: "invalid package.json"}, nil
+	}
+	return c.loadPackage(ctx, root, ".", value)
+}
 
+func (c Checker) loadPackage(ctx context.Context, root, rel string, value manifest) (Package, error) {
+	pack := Package{root: root, rel: rel, name: value.Name}
 	stdout, stderr, err := c.pack(ctx, root)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return Package{}, ctxErr
 		}
-		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
-			pack.status = StatusUnavailable
-			pack.reason = "npm executable not found"
-			return pack, nil
+		switch {
+		case errors.Is(err, exec.ErrNotFound), errors.Is(err, os.ErrNotExist):
+			pack.status, pack.reason = StatusUnavailable, "npm executable not found"
+		default:
+			pack.status, pack.reason = StatusUnavailable, commandError(err, stderr)
 		}
-		pack.status = StatusUnavailable
-		pack.reason = commandError(err, stderr)
 		return pack, nil
 	}
 
 	var packs []packResult
 	if err := json.Unmarshal(stdout, &packs); err != nil {
-		pack.status = StatusUnavailable
-		pack.reason = "invalid npm pack output"
+		pack.status, pack.reason = StatusUnavailable, "invalid npm pack output"
 		return pack, nil
 	}
 	if len(packs) != 1 {
-		pack.status = StatusUnavailable
-		pack.reason = fmt.Sprintf("npm returned %d packages", len(packs))
+		pack.status, pack.reason = StatusUnavailable, fmt.Sprintf("npm returned %d packages", len(packs))
 		return pack, nil
 	}
-
-	pack.files = packs[0].Files
-	pack.paths, err = packPaths(pack.files)
+	pack.paths, err = packPaths(packs[0].Files)
 	if err != nil {
-		return Package{}, err
+		return Package{}, fmt.Errorf("analyze npm package %s: %w", rel, err)
 	}
 	return pack, nil
 }
 
+func (p Packages) CheckPath(path string) (Result, error) {
+	rel := filepath.Clean(filepath.FromSlash(path))
+	if filepath.IsAbs(rel) || outside(rel) {
+		return Result{}, fmt.Errorf("path %q is not relative to npm package %q", path, p.root)
+	}
+	full := filepath.Join(p.root, rel)
+	result := Result{Root: p.root, Status: p.status, Reason: p.reason}
+	for _, pack := range p.packages {
+		packagePath, err := filepath.Rel(pack.root, full)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolve path relative to npm workspace: %w", err)
+		}
+		if outside(packagePath) {
+			continue
+		}
+		packageResult, err := pack.CheckPath(filepath.ToSlash(packagePath))
+		if err != nil {
+			return Result{}, err
+		}
+		result.Packages = append(result.Packages, PackageResult{
+			Root:   pack.rel,
+			Name:   pack.name,
+			Status: packageResult.Status,
+			Reason: packageResult.Reason,
+		})
+	}
+	if len(result.Packages) != 0 {
+		result.Status, result.Reason = aggregate(result.Packages)
+	}
+	return result, nil
+}
+
 func (p Package) CheckPath(path string) (Result, error) {
 	rel := filepath.Clean(filepath.FromSlash(path))
-	if rel == "." || filepath.IsAbs(rel) || outside(rel) {
+	if filepath.IsAbs(rel) || outside(rel) {
 		return Result{}, fmt.Errorf("path %q is not relative to npm package %q", path, p.root)
 	}
 	if p.status != "" {
 		return p.result(p.status, p.reason), nil
 	}
-	_, included := p.paths[filepath.ToSlash(rel)]
+	included, err := p.contains(rel)
+	if err != nil {
+		return Result{}, err
+	}
 	return p.inclusionResult(included), nil
 }
 
@@ -159,6 +268,47 @@ func (p Package) inclusionResult(included bool) Result {
 
 func (p Package) result(status Status, reason string) Result {
 	return Result{Root: p.root, Status: status, Reason: reason}
+}
+
+func (p Package) contains(path string) (bool, error) {
+	info, err := os.Stat(filepath.Join(p.root, path))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect npm package path: %w", err)
+	}
+	if !info.IsDir() {
+		_, included := p.paths[filepath.ToSlash(path)]
+		return included, nil
+	}
+	for candidate := range p.paths {
+		child, err := filepath.Rel(path, filepath.FromSlash(candidate))
+		if err != nil {
+			return false, fmt.Errorf("compare npm package path: %w", err)
+		}
+		if !outside(child) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func aggregate(results []PackageResult) (Status, string) {
+	for _, result := range results {
+		if result.Status == StatusIncluded {
+			return StatusIncluded, "selected by npm pack"
+		}
+	}
+	for _, result := range results {
+		if result.Status == StatusUnavailable {
+			if len(results) == 1 {
+				return result.Status, result.Reason
+			}
+			return StatusUnavailable, "one or more npm packages unavailable"
+		}
+	}
+	return StatusExcluded, "not selected by npm pack"
 }
 
 func packPaths(files []packFile) (map[string]struct{}, error) {
@@ -192,8 +342,7 @@ func (c Checker) pack(ctx context.Context, root string) ([]byte, []byte, error) 
 		"--audit=false",
 		"--fund=false",
 	)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = root
 	cmd.Stdout = &stdout
@@ -206,7 +355,6 @@ func (c Checker) commandLine(ctx context.Context) (string, []string, error) {
 	if runtime.GOOS != "windows" || !strings.EqualFold(filepath.Base(c.command), "npm") {
 		return c.command, nil, nil
 	}
-
 	npm, err := exec.LookPath("npm.cmd")
 	if err != nil {
 		return "", nil, exec.ErrNotFound
@@ -236,46 +384,6 @@ func (c Checker) commandLine(ctx context.Context) (string, []string, error) {
 		return "", nil, fmt.Errorf("find npm CLI: %w", err)
 	}
 	return node, []string{cli}, nil
-}
-
-func contains(root, path string, files []packFile) (bool, error) {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect npm package path: %w", err)
-	}
-
-	for _, file := range files {
-		rel := filepath.Clean(filepath.FromSlash(file.Path))
-		if filepath.IsAbs(rel) || outside(rel) {
-			return false, fmt.Errorf("read npm pack output: invalid path %q", file.Path)
-		}
-		candidate := filepath.Join(root, rel)
-		if info.IsDir() {
-			child, err := filepath.Rel(path, candidate)
-			if err != nil {
-				return false, fmt.Errorf("compare npm package path: %w", err)
-			}
-			if !outside(child) {
-				return true, nil
-			}
-			continue
-		}
-
-		candidateInfo, err := os.Stat(candidate)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, fmt.Errorf("inspect npm pack output: %w", err)
-		}
-		if os.SameFile(info, candidateInfo) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func outside(path string) bool {
