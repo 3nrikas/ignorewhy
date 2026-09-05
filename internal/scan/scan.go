@@ -180,6 +180,8 @@ func sensitivePattern(path string) string {
 	switch {
 	case name == ".env":
 		return ".env"
+	case name == ".env.example" || name == ".env.sample" || name == ".env.template":
+		return ""
 	case strings.HasPrefix(name, ".env."):
 		return ".env.*"
 	case name == "id_rsa":
