@@ -50,10 +50,17 @@ Run it from anywhere inside a Git repository:
 
 ```sh
 ignorewhy scan
+ignorewhy scan --json
+ignorewhy scan --ci
 ignorewhy path/to/file
 ignorewhy --help
 ignorewhy --version
 ```
+
+`scan --json` writes schema-versioned machine-readable output. `scan --ci`
+returns exit code 3 when findings are present; operational errors return 1 and
+invalid command usage returns 2. Plain `scan` remains informational and returns
+success even when it finds mismatches.
 
 ## Features
 
@@ -65,6 +72,7 @@ ignorewhy --version
 - Uses `npm pack` to follow real npm package inclusion rules.
 - Disables npm lifecycle scripts and runs npm analysis offline.
 - Scans a repository for cross-context mismatches in one command.
+- Provides deterministic JSON output and a CI failure mode.
 - Detects files ignored by Git but included by Docker or npm.
 - Works locally without a Docker daemon, account, or telemetry.
 
