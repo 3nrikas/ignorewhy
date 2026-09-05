@@ -10,12 +10,18 @@ import (
 	"github.com/3nrikas/ignorewhy/internal/dockercheck"
 	"github.com/3nrikas/ignorewhy/internal/gitcheck"
 	"github.com/3nrikas/ignorewhy/internal/npmcheck"
+	"github.com/3nrikas/ignorewhy/internal/report"
 	"github.com/3nrikas/ignorewhy/internal/scan"
 )
 
 const Version = "dev"
+const exitFindings = 3
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "scan" {
+		return runScan(ctx, args[1:], stdout, stderr)
+	}
+
 	flags := flag.NewFlagSet("ignorewhy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	help := flags.Bool("help", false, "show help")
@@ -44,9 +50,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: get working directory: %v\n", err)
 		return 1
 	}
-	if flags.Arg(0) == "scan" {
-		return runScan(ctx, dir, stdout, stderr)
-	}
 	return runPath(ctx, dir, flags.Arg(0), stdout, stderr)
 }
 
@@ -71,21 +74,59 @@ func runPath(ctx context.Context, dir, path string, stdout, stderr io.Writer) in
 	return 0
 }
 
-func runScan(ctx context.Context, dir string, stdout, stderr io.Writer) int {
+func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("ignorewhy scan", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "write JSON output")
+	ci := flags.Bool("ci", false, "exit 3 when findings are found")
+	help := flags.Bool("help", false, "show help")
+	flags.Usage = func() { printScanUsage(stderr) }
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *help {
+		printScanUsage(stdout)
+		return 0
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "error: scan does not accept paths")
+		printScanUsage(stderr)
+		return 2
+	}
+
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: get working directory: %v\n", err)
+		return 1
+	}
 	result, err := scan.Run(ctx, dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	printScan(stdout, result)
+	if *jsonOutput {
+		if err := report.WriteJSON(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "error: write JSON output: %v\n", err)
+			return 1
+		}
+	} else {
+		printScan(stdout, result)
+	}
+	if *ci && len(result.Findings) != 0 {
+		return exitFindings
+	}
 	return 0
 }
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: ignorewhy <path>")
-	fmt.Fprintln(w, "       ignorewhy scan")
+	fmt.Fprintln(w, "       ignorewhy scan [--json] [--ci]")
 	fmt.Fprintln(w, "       ignorewhy --help")
 	fmt.Fprintln(w, "       ignorewhy --version")
+}
+
+func printScanUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: ignorewhy scan [--json] [--ci]")
 }
 
 func printScan(w io.Writer, result scan.Result) {
