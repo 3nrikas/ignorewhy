@@ -6,17 +6,38 @@ import (
 	"io/fs"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/3nrikas/ignorewhy/internal/dockercheck"
 	"github.com/3nrikas/ignorewhy/internal/gitcheck"
 	"github.com/3nrikas/ignorewhy/internal/npmcheck"
 )
 
+const largeFileSize int64 = 10 << 20
+
+type Reason string
+
+const (
+	ReasonGitIgnoredDockerIncluded  Reason = "git_ignored_docker_included"
+	ReasonGitIgnoredNPMIncluded     Reason = "git_ignored_npm_included"
+	ReasonDockerExcludedNPMIncluded Reason = "docker_excluded_npm_included"
+	ReasonSensitivePath             Reason = "sensitive_path"
+	ReasonLargeFile                 Reason = "large_file"
+)
+
+type Options struct {
+	Sensitive bool
+	Large     bool
+}
+
 type Finding struct {
-	Path   string
-	Git    gitcheck.Result
-	Docker dockercheck.Result
-	NPM    npmcheck.Result
+	Path             string
+	Size             int64
+	Reasons          []Reason
+	SensitivePattern string
+	Git              gitcheck.Result
+	Docker           dockercheck.Result
+	NPM              npmcheck.Result
 }
 
 type Result struct {
@@ -26,6 +47,10 @@ type Result struct {
 }
 
 func Run(ctx context.Context, dir string) (Result, error) {
+	return RunWithOptions(ctx, dir, Options{})
+}
+
+func RunWithOptions(ctx context.Context, dir string, options Options) (Result, error) {
 	git := gitcheck.New()
 	root, err := git.Root(ctx, dir)
 	if err != nil {
@@ -40,17 +65,22 @@ func Run(ctx context.Context, dir string) (Result, error) {
 		return Result{}, err
 	}
 
-	paths, err := files(ctx, root)
+	files, err := files(ctx, root)
 	if err != nil {
 		return Result{}, err
+	}
+	paths := make([]string, len(files))
+	for i, file := range files {
+		paths[i] = file.path
 	}
 	gitResults, err := git.CheckPaths(ctx, root, paths)
 	if err != nil {
 		return Result{}, err
 	}
 
-	result := Result{Root: root, Files: len(paths)}
-	for i, path := range paths {
+	result := Result{Root: root, Files: len(files)}
+	for i, file := range files {
+		path := file.path
 		dockerResult, err := docker.CheckPath(path)
 		if err != nil {
 			return Result{}, err
@@ -59,21 +89,42 @@ func Run(ctx context.Context, dir string) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		if !mismatch(gitResults[i], dockerResult, npmResult) {
+		reasons := mismatchReasons(gitResults[i], dockerResult, npmResult)
+		shipped := gitResults[i].Status == gitcheck.StatusTracked ||
+			dockerResult.Status == dockercheck.StatusIncluded || npmResult.Status == npmcheck.StatusIncluded
+		pattern := ""
+		if options.Sensitive && shipped {
+			pattern = sensitivePattern(path)
+			if pattern != "" {
+				reasons = append(reasons, ReasonSensitivePath)
+			}
+		}
+		if options.Large && shipped && file.size >= largeFileSize {
+			reasons = append(reasons, ReasonLargeFile)
+		}
+		if len(reasons) == 0 {
 			continue
 		}
 		result.Findings = append(result.Findings, Finding{
-			Path:   path,
-			Git:    gitResults[i],
-			Docker: dockerResult,
-			NPM:    npmResult,
+			Path:             path,
+			Size:             file.size,
+			Reasons:          reasons,
+			SensitivePattern: pattern,
+			Git:              gitResults[i],
+			Docker:           dockerResult,
+			NPM:              npmResult,
 		})
 	}
 	return result, nil
 }
 
-func files(ctx context.Context, root string) ([]string, error) {
-	var paths []string
+type file struct {
+	path string
+	size int64
+}
+
+func files(ctx context.Context, root string) ([]file, error) {
+	var files []file
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -90,25 +141,70 @@ func files(ctx context.Context, root string) ([]string, error) {
 		if !entry.Type().IsRegular() {
 			return nil
 		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return fmt.Errorf("resolve scanned path: %w", err)
 		}
-		paths = append(paths, filepath.ToSlash(rel))
+		files = append(files, file{path: filepath.ToSlash(rel), size: info.Size()})
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scan repository files: %w", err)
 	}
-	sort.Strings(paths)
-	return paths, nil
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+	return files, nil
 }
 
-func mismatch(git gitcheck.Result, docker dockercheck.Result, npm npmcheck.Result) bool {
+func mismatchReasons(git gitcheck.Result, docker dockercheck.Result, npm npmcheck.Result) []Reason {
+	var reasons []Reason
 	if git.Status == gitcheck.StatusIgnored {
-		if docker.Status == dockercheck.StatusIncluded || npm.Status == npmcheck.StatusIncluded {
-			return true
+		if docker.Status == dockercheck.StatusIncluded {
+			reasons = append(reasons, ReasonGitIgnoredDockerIncluded)
+		}
+		if npm.Status == npmcheck.StatusIncluded {
+			reasons = append(reasons, ReasonGitIgnoredNPMIncluded)
 		}
 	}
-	return docker.Status == dockercheck.StatusExcluded && npm.Status == npmcheck.StatusIncluded
+	if docker.Status == dockercheck.StatusExcluded && npm.Status == npmcheck.StatusIncluded {
+		reasons = append(reasons, ReasonDockerExcludedNPMIncluded)
+	}
+	return reasons
+}
+
+func sensitivePattern(path string) string {
+	name := strings.ToLower(filepath.Base(filepath.FromSlash(path)))
+	switch {
+	case name == ".env":
+		return ".env"
+	case strings.HasPrefix(name, ".env."):
+		return ".env.*"
+	case name == "id_rsa":
+		return "id_rsa"
+	case name == "credentials.json":
+		return "credentials.json"
+	case name == "service-account.json":
+		return "service-account.json"
+	case name == "dump.sql":
+		return "dump.sql"
+	case strings.HasPrefix(name, "secrets."):
+		return "secrets.*"
+	case strings.HasSuffix(name, ".pem"):
+		return "*.pem"
+	case strings.HasSuffix(name, ".key"):
+		return "*.key"
+	case strings.HasSuffix(name, ".p12"):
+		return "*.p12"
+	case strings.HasSuffix(name, ".pfx"):
+		return "*.pfx"
+	case strings.HasSuffix(name, ".sqlite"):
+		return "*.sqlite"
+	case strings.HasSuffix(name, ".db"):
+		return "*.db"
+	default:
+		return ""
+	}
 }
