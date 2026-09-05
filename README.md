@@ -43,6 +43,9 @@ ships somewhere you did not expect.
 go install github.com/3nrikas/ignorewhy@latest
 ```
 
+Tagged releases will also provide archives for Linux, macOS, and Windows with
+SHA-256 checksums.
+
 Git must be available on `PATH`. npm is optional; when it is unavailable, the
 Git and Docker checks still work.
 
