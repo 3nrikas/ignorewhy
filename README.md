@@ -49,7 +49,7 @@ SHA-256 checksums.
 Git must be available on `PATH`. npm is optional; when it is unavailable, the
 Git and Docker checks still work.
 
-### GitHub Action
+<img src="assets/githubaction.png" height="64" alt="GitHub Action">
 
 Run the same scan on every pull request:
 
