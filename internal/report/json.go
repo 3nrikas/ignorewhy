@@ -6,6 +6,7 @@ import (
 
 	"github.com/3nrikas/ignorewhy/internal/dockercheck"
 	"github.com/3nrikas/ignorewhy/internal/gitcheck"
+	"github.com/3nrikas/ignorewhy/internal/npmcheck"
 	"github.com/3nrikas/ignorewhy/internal/scan"
 )
 
@@ -26,13 +27,26 @@ type finding struct {
 	SensitivePattern string        `json:"sensitive_pattern,omitempty"`
 	Git              context       `json:"git"`
 	Docker           context       `json:"docker"`
-	NPM              context       `json:"npm"`
+	NPM              npmContext    `json:"npm"`
 }
 
 type context struct {
 	Status string `json:"status"`
 	Rule   *rule  `json:"rule,omitempty"`
 	Reason string `json:"reason,omitempty"`
+}
+
+type npmContext struct {
+	Status   string       `json:"status"`
+	Reason   string       `json:"reason"`
+	Packages []npmPackage `json:"packages,omitempty"`
+}
+
+type npmPackage struct {
+	Root   string `json:"root"`
+	Name   string `json:"name,omitempty"`
+	Status string `json:"status"`
+	Reason string `json:"reason"`
 }
 
 type rule struct {
@@ -58,7 +72,7 @@ func WriteJSON(w io.Writer, result scan.Result) error {
 			SensitivePattern: item.SensitivePattern,
 			Git:              gitContext(item.Git),
 			Docker:           dockerContext(item.Docker),
-			NPM:              context{Status: string(item.NPM.Status), Reason: item.NPM.Reason},
+			NPM:              makeNPMContext(item.NPM),
 		}
 	}
 
@@ -89,6 +103,23 @@ func dockerContext(result dockercheck.Result) context {
 			Line:    result.Rule.Line,
 			Pattern: result.Rule.Pattern,
 			Negated: result.Rule.Negated,
+		}
+	}
+	return value
+}
+
+func makeNPMContext(result npmcheck.Result) npmContext {
+	value := npmContext{
+		Status:   string(result.Status),
+		Reason:   result.Reason,
+		Packages: make([]npmPackage, len(result.Packages)),
+	}
+	for i, pack := range result.Packages {
+		value.Packages[i] = npmPackage{
+			Root:   pack.Root,
+			Name:   pack.Name,
+			Status: string(pack.Status),
+			Reason: pack.Reason,
 		}
 	}
 	return value

@@ -237,6 +237,21 @@ func printDocker(w io.Writer, result dockercheck.Result) {
 }
 
 func printNPM(w io.Writer, result npmcheck.Result) {
+	workspace := len(result.Packages) > 1 ||
+		len(result.Packages) == 1 && result.Packages[0].Root != "."
+	if workspace {
+		for i, pack := range result.Packages {
+			if i != 0 {
+				fmt.Fprintln(w)
+			}
+			label := pack.Root
+			if pack.Name != "" {
+				label += " · " + pack.Name
+			}
+			fmt.Fprintf(w, "npm (%s)\n  %s\n  %s\n", label, pack.Status, pack.Reason)
+		}
+		return
+	}
 	fmt.Fprintf(w, "npm\n  %s\n", result.Status)
 	fmt.Fprintf(w, "  %s\n", result.Reason)
 }

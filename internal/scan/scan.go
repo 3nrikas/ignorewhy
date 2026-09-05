@@ -60,7 +60,7 @@ func RunWithOptions(ctx context.Context, dir string, options Options) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	pkg, err := npmcheck.New().Load(ctx, root)
+	packages, err := npmcheck.New().LoadAll(ctx, root)
 	if err != nil {
 		return Result{}, err
 	}
@@ -85,7 +85,7 @@ func RunWithOptions(ctx context.Context, dir string, options Options) (Result, e
 		if err != nil {
 			return Result{}, err
 		}
-		npmResult, err := pkg.CheckPath(path)
+		npmResult, err := packages.CheckPath(path)
 		if err != nil {
 			return Result{}, err
 		}
