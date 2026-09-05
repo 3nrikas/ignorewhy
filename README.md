@@ -49,6 +49,37 @@ SHA-256 checksums.
 Git must be available on `PATH`. npm is optional; when it is unavailable, the
 Git and Docker checks still work.
 
+### GitHub Action
+
+Run the same scan on every pull request:
+
+```yaml
+name: ignorewhy
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: 3nrikas/ignorewhy@main
+```
+
+The Action fails the job when findings are present. Sensitive and large-file
+checks can be enabled when needed:
+
+```yaml
+- uses: 3nrikas/ignorewhy@main
+  with:
+    sensitive: true
+    large: true
+```
+
 <img src="assets/usage.png" height="64" alt="Usage">
 
 Run it from anywhere inside a Git repository:
@@ -84,6 +115,7 @@ success even when it finds mismatches.
 - Disables npm lifecycle scripts and runs npm analysis offline.
 - Scans a repository for cross-context mismatches in one command.
 - Provides deterministic JSON output and a CI failure mode.
+- Runs the same CI scan through a native GitHub Action.
 - Optionally finds sensitive-looking paths and large shipped files.
 - Detects files ignored by Git but included by Docker or npm.
 - Works locally without a Docker daemon, account, or telemetry.
