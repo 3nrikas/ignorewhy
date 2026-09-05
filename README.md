@@ -129,7 +129,9 @@ success even when it finds mismatches.
 | npm | `npm pack --dry-run --ignore-scripts --offline` |
 
 The Git repository root is used as the Docker build context and as the root npm
-package. npm workspaces and custom Docker build contexts are not supported yet.
+package. npm workspaces declared in the root `package.json` are discovered
+automatically from array or `workspaces.packages` declarations, including common
+`*` and `**` patterns. Custom Docker build contexts are not supported yet.
 
 <img src="assets/license.png" height="64" alt="License">
 
