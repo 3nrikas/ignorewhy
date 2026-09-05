@@ -14,7 +14,8 @@ import (
 	"github.com/3nrikas/ignorewhy/internal/scan"
 )
 
-const Version = "dev"
+var Version = "dev"
+
 const exitFindings = 3
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
