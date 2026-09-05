@@ -1,0 +1,69 @@
+name: ignorewhy
+description: Find files ignored by Git but shipped by Docker or npm
+author: 3nrikas
+
+inputs:
+  sensitive:
+    description: Check for sensitive-looking shipped paths
+    required: false
+    default: "false"
+  large:
+    description: Check for shipped files of at least 10 MiB
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: ${{ github.action_path }}/go.mod
+        cache-dependency-path: ${{ github.action_path }}/go.sum
+    - name: Run ignorewhy
+      shell: pwsh
+      env:
+        IGNOREWHY_ACTION_PATH: ${{ github.action_path }}
+        IGNOREWHY_ACTION_REF: ${{ github.action_ref }}
+        IGNOREWHY_SENSITIVE: ${{ inputs.sensitive }}
+        IGNOREWHY_LARGE: ${{ inputs.large }}
+        CGO_ENABLED: "0"
+      run: |
+        $sensitive = "$env:IGNOREWHY_SENSITIVE".ToLowerInvariant()
+        $large = "$env:IGNOREWHY_LARGE".ToLowerInvariant()
+        if ($sensitive -notin @("true", "false")) {
+          Write-Error "sensitive must be true or false"
+          exit 2
+        }
+        if ($large -notin @("true", "false")) {
+          Write-Error "large must be true or false"
+          exit 2
+        }
+
+        $version = "$env:IGNOREWHY_ACTION_REF"
+        if ([string]::IsNullOrWhiteSpace($version)) {
+          $version = "dev"
+        }
+        $binary = Join-Path $env:RUNNER_TEMP "ignorewhy-action"
+        if ($env:RUNNER_OS -eq "Windows") {
+          $binary += ".exe"
+        }
+        $ldflags = "-s -w -X github.com/3nrikas/ignorewhy/cmd.Version=$version"
+        & go -C $env:IGNOREWHY_ACTION_PATH build -trimpath -ldflags $ldflags -o $binary .
+        if ($LASTEXITCODE -ne 0) {
+          exit $LASTEXITCODE
+        }
+
+        $arguments = @("scan", "--ci")
+        if ($sensitive -eq "true") {
+          $arguments += "--sensitive"
+        }
+        if ($large -eq "true") {
+          $arguments += "--large"
+        }
+        & $binary @arguments
+        exit $LASTEXITCODE
+
+branding:
+  icon: eye
+  color: purple
