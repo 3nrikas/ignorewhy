@@ -50,7 +50,7 @@ func (c Checker) Check(ctx context.Context, dir, path string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve working directory: %w", err)
 	}
-	root, err := c.findRoot(ctx, dir)
+	root, err := c.Root(ctx, dir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -69,32 +69,20 @@ func (c Checker) Check(ctx context.Context, dir, path string) (Result, error) {
 	}
 	rel = filepath.ToSlash(rel)
 
-	tracked, err := c.isTracked(ctx, root, rel)
+	results, err := c.CheckPaths(ctx, root, []string{rel})
 	if err != nil {
 		return Result{}, err
 	}
-	rule, err := c.ignoreRule(ctx, root, rel)
-	if err != nil {
-		return Result{}, err
-	}
-
-	result := Result{
-		Path: filepath.Clean(path),
-		Root: root,
-		Rule: rule,
-	}
-	switch {
-	case tracked:
-		result.Status = StatusTracked
-	case rule != nil && !rule.Negated:
-		result.Status = StatusIgnored
-	default:
-		result.Status = StatusIncluded
-	}
+	result := results[0]
+	result.Path = filepath.Clean(path)
 	return result, nil
 }
 
-func (c Checker) findRoot(ctx context.Context, dir string) (string, error) {
+func (c Checker) Root(ctx context.Context, dir string) (string, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve working directory: %w", err)
+	}
 	stdout, stderr, err := c.run(ctx, dir, nil, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("find Git repository root: %w", commandError(ctx, err, stderr))
@@ -106,41 +94,100 @@ func (c Checker) findRoot(ctx context.Context, dir string) (string, error) {
 	return filepath.Clean(root), nil
 }
 
-func (c Checker) isTracked(ctx context.Context, root, path string) (bool, error) {
-	_, stderr, err := c.run(ctx, root, nil, "ls-files", "--error-unmatch", "--", path)
-	if err == nil {
-		return true, nil
+func (c Checker) CheckPaths(ctx context.Context, root string, paths []string) ([]Result, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Git repository root: %w", err)
 	}
-	if exitCode(err) == 1 {
-		return false, nil
+	clean := make([]string, len(paths))
+	for i, path := range paths {
+		path = filepath.Clean(filepath.FromSlash(path))
+		if path == "." || filepath.IsAbs(path) || outside(path) {
+			return nil, fmt.Errorf("path %q is not relative to Git repository %q", paths[i], root)
+		}
+		clean[i] = filepath.ToSlash(path)
 	}
-	return false, fmt.Errorf("check Git tracked status: %w", commandError(ctx, err, stderr))
+	if len(clean) == 0 {
+		return []Result{}, nil
+	}
+
+	stdout, stderr, err := c.run(ctx, root, nil, "ls-files", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("list Git tracked files: %w", commandError(ctx, err, stderr))
+	}
+	tracked := make(map[string]struct{})
+	for _, path := range splitNull(stdout) {
+		tracked[path] = struct{}{}
+	}
+
+	stdin := []byte(strings.Join(clean, "\x00") + "\x00")
+	stdout, stderr, err = c.run(ctx, root, stdin, "check-ignore", "-v", "--no-index", "-z", "--stdin")
+	if err != nil {
+		if exitCode(err) != 1 {
+			return nil, fmt.Errorf("check Git ignore status: %w", commandError(ctx, err, stderr))
+		}
+	}
+
+	rules, err := parseRules(stdout)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]Result, len(clean))
+	for i, path := range clean {
+		result := Result{Path: path, Root: root, Rule: rules[path]}
+		_, isTracked := tracked[path]
+		switch {
+		case isTracked:
+			result.Status = StatusTracked
+		case result.Rule != nil && !result.Rule.Negated:
+			result.Status = StatusIgnored
+		default:
+			result.Status = StatusIncluded
+		}
+		results[i] = result
+	}
+	return results, nil
 }
 
-func (c Checker) ignoreRule(ctx context.Context, root, path string) (*Rule, error) {
-	stdout, stderr, err := c.run(ctx, root, []byte(path+"\x00"), "check-ignore", "-v", "--no-index", "-z", "--stdin")
-	if err != nil {
-		if exitCode(err) == 1 {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("check Git ignore status: %w", commandError(ctx, err, stderr))
+func parseRules(output []byte) (map[string]*Rule, error) {
+	fields := bytes.Split(output, []byte{0})
+	if len(fields) == 1 && len(fields[0]) == 0 {
+		return map[string]*Rule{}, nil
 	}
-
-	fields := bytes.Split(stdout, []byte{0})
-	if len(fields) != 5 || len(fields[4]) != 0 {
+	if len(fields) < 1 || len(fields[len(fields)-1]) != 0 || (len(fields)-1)%4 != 0 {
 		return nil, fmt.Errorf("check Git ignore status: unexpected output from Git")
 	}
-	line, err := strconv.Atoi(string(fields[1]))
-	if err != nil {
-		return nil, fmt.Errorf("check Git ignore status: invalid rule line %q", fields[1])
+	rules := make(map[string]*Rule, (len(fields)-1)/4)
+	for i := 0; i < len(fields)-1; i += 4 {
+		line, err := strconv.Atoi(string(fields[i+1]))
+		if err != nil {
+			return nil, fmt.Errorf("check Git ignore status: invalid rule line %q", fields[i+1])
+		}
+		pattern := string(fields[i+2])
+		path := string(fields[i+3])
+		rules[path] = &Rule{
+			Source:  filepath.ToSlash(string(fields[i])),
+			Line:    line,
+			Pattern: pattern,
+			Negated: strings.HasPrefix(pattern, "!"),
+		}
 	}
-	pattern := string(fields[2])
-	return &Rule{
-		Source:  filepath.ToSlash(string(fields[0])),
-		Line:    line,
-		Pattern: pattern,
-		Negated: strings.HasPrefix(pattern, "!"),
-	}, nil
+	return rules, nil
+}
+
+func splitNull(output []byte) []string {
+	fields := bytes.Split(output, []byte{0})
+	paths := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if len(field) != 0 {
+			paths = append(paths, string(field))
+		}
+	}
+	return paths
+}
+
+func outside(path string) bool {
+	return path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator))
 }
 
 func (c Checker) run(ctx context.Context, dir string, stdin []byte, args ...string) ([]byte, []byte, error) {

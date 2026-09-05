@@ -32,6 +32,14 @@ type Checker struct {
 	command string
 }
 
+type Package struct {
+	root   string
+	status Status
+	reason string
+	files  []packFile
+	paths  map[string]struct{}
+}
+
 type packResult struct {
 	Files []packFile `json:"files"`
 }
@@ -67,54 +75,102 @@ func (c Checker) Check(ctx context.Context, root, dir, path string) (Result, err
 		return Result{}, fmt.Errorf("path %q is outside npm package %q", path, root)
 	}
 
-	result := Result{Root: root}
+	pack, err := c.Load(ctx, root)
+	if err != nil {
+		return Result{}, err
+	}
+	if pack.status != "" {
+		return pack.result(pack.status, pack.reason), nil
+	}
+	included, err := contains(root, full, pack.files)
+	if err != nil {
+		return Result{}, err
+	}
+	return pack.inclusionResult(included), nil
+}
+
+func (c Checker) Load(ctx context.Context, root string) (Package, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return Package{}, fmt.Errorf("resolve npm package root: %w", err)
+	}
+	pack := Package{root: root}
 	if _, err := os.Stat(filepath.Join(root, "package.json")); errors.Is(err, os.ErrNotExist) {
-		result.Status = StatusNotApplicable
-		result.Reason = "no package.json"
-		return result, nil
+		pack.status = StatusNotApplicable
+		pack.reason = "no package.json"
+		return pack, nil
 	} else if err != nil {
-		return Result{}, fmt.Errorf("read package.json: %w", err)
+		return Package{}, fmt.Errorf("read package.json: %w", err)
 	}
 
 	stdout, stderr, err := c.pack(ctx, root)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return Result{}, ctxErr
+			return Package{}, ctxErr
 		}
 		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
-			result.Status = StatusUnavailable
-			result.Reason = "npm executable not found"
-			return result, nil
+			pack.status = StatusUnavailable
+			pack.reason = "npm executable not found"
+			return pack, nil
 		}
-		result.Status = StatusUnavailable
-		result.Reason = commandError(err, stderr)
-		return result, nil
+		pack.status = StatusUnavailable
+		pack.reason = commandError(err, stderr)
+		return pack, nil
 	}
 
 	var packs []packResult
 	if err := json.Unmarshal(stdout, &packs); err != nil {
-		result.Status = StatusUnavailable
-		result.Reason = "invalid npm pack output"
-		return result, nil
+		pack.status = StatusUnavailable
+		pack.reason = "invalid npm pack output"
+		return pack, nil
 	}
 	if len(packs) != 1 {
-		result.Status = StatusUnavailable
-		result.Reason = fmt.Sprintf("npm returned %d packages", len(packs))
-		return result, nil
+		pack.status = StatusUnavailable
+		pack.reason = fmt.Sprintf("npm returned %d packages", len(packs))
+		return pack, nil
 	}
 
-	included, err := contains(root, full, packs[0].Files)
+	pack.files = packs[0].Files
+	pack.paths, err = packPaths(pack.files)
 	if err != nil {
-		return Result{}, err
+		return Package{}, err
 	}
+	return pack, nil
+}
+
+func (p Package) CheckPath(path string) (Result, error) {
+	rel := filepath.Clean(filepath.FromSlash(path))
+	if rel == "." || filepath.IsAbs(rel) || outside(rel) {
+		return Result{}, fmt.Errorf("path %q is not relative to npm package %q", path, p.root)
+	}
+	if p.status != "" {
+		return p.result(p.status, p.reason), nil
+	}
+	_, included := p.paths[filepath.ToSlash(rel)]
+	return p.inclusionResult(included), nil
+}
+
+func (p Package) inclusionResult(included bool) Result {
 	if included {
-		result.Status = StatusIncluded
-		result.Reason = "selected by npm pack"
-	} else {
-		result.Status = StatusExcluded
-		result.Reason = "not selected by npm pack"
+		return p.result(StatusIncluded, "selected by npm pack")
 	}
-	return result, nil
+	return p.result(StatusExcluded, "not selected by npm pack")
+}
+
+func (p Package) result(status Status, reason string) Result {
+	return Result{Root: p.root, Status: status, Reason: reason}
+}
+
+func packPaths(files []packFile) (map[string]struct{}, error) {
+	paths := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		rel := filepath.Clean(filepath.FromSlash(file.Path))
+		if filepath.IsAbs(rel) || outside(rel) {
+			return nil, fmt.Errorf("read npm pack output: invalid path %q", file.Path)
+		}
+		paths[filepath.ToSlash(rel)] = struct{}{}
+	}
+	return paths, nil
 }
 
 func (c Checker) pack(ctx context.Context, root string) ([]byte, []byte, error) {

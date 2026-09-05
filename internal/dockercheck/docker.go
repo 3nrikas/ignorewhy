@@ -34,17 +34,59 @@ type Result struct {
 }
 
 type pattern struct {
-	value string
-	text  string
-	line  int
+	value   string
+	text    string
+	line    int
+	matcher *patternmatcher.PatternMatcher
+}
+
+type Matcher struct {
+	root     string
+	source   string
+	patterns []pattern
+	matcher  *patternmatcher.PatternMatcher
+}
+
+func Load(root string) (Matcher, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return Matcher{}, fmt.Errorf("resolve Docker context: %w", err)
+	}
+	patterns, source, err := readPatterns(root)
+	if err != nil {
+		return Matcher{}, err
+	}
+	matcher := Matcher{root: root, source: source, patterns: patterns}
+	if len(patterns) == 0 {
+		return matcher, nil
+	}
+
+	values := make([]string, len(patterns))
+	for i := range patterns {
+		values[i] = patterns[i].value
+		value := strings.TrimPrefix(patterns[i].value, "!")
+		patterns[i].matcher, err = patternmatcher.New([]string{value})
+		if err != nil {
+			return Matcher{}, fmt.Errorf("parse %s:%d: %w", source, patterns[i].line, err)
+		}
+	}
+	matcher.matcher, err = patternmatcher.New(values)
+	if err != nil {
+		return Matcher{}, fmt.Errorf("parse %s: %w", source, err)
+	}
+	return matcher, nil
 }
 
 func Check(root, dir, path string) (Result, error) {
-	root, err := filepath.Abs(root)
+	matcher, err := Load(root)
 	if err != nil {
-		return Result{}, fmt.Errorf("resolve Docker context: %w", err)
+		return Result{}, err
 	}
-	dir, err = filepath.Abs(dir)
+	return matcher.Check(dir, path)
+}
+
+func (m Matcher) Check(dir, path string) (Result, error) {
+	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve working directory: %w", err)
 	}
@@ -53,52 +95,45 @@ func Check(root, dir, path string) (Result, error) {
 	if !filepath.IsAbs(full) {
 		full = filepath.Join(dir, full)
 	}
-	rel, err := filepath.Rel(root, filepath.Clean(full))
+	rel, err := filepath.Rel(m.root, filepath.Clean(full))
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve path relative to Docker context: %w", err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return Result{}, fmt.Errorf("path %q is outside Docker context %q", path, root)
+		return Result{}, fmt.Errorf("path %q is outside Docker context %q", path, m.root)
+	}
+	return m.CheckPath(filepath.ToSlash(rel))
+}
+
+func (m Matcher) CheckPath(path string) (Result, error) {
+	rel := filepath.Clean(filepath.FromSlash(path))
+	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return Result{}, fmt.Errorf("path %q is not relative to Docker context %q", path, m.root)
 	}
 	rel = filepath.ToSlash(rel)
-
-	patterns, source, err := readPatterns(root)
-	if err != nil {
-		return Result{}, err
-	}
-	result := Result{Root: root, Status: StatusIncluded}
-	if len(patterns) == 0 {
+	result := Result{Root: m.root, Status: StatusIncluded}
+	if len(m.patterns) == 0 {
 		return result, nil
 	}
 
-	values := make([]string, len(patterns))
-	for i, pattern := range patterns {
-		values[i] = pattern.value
-		if _, err := patternmatcher.New([]string{pattern.value}); err != nil {
-			return Result{}, fmt.Errorf("parse %s:%d: %w", source, pattern.line, err)
-		}
-		match := pattern.value
-		negated := strings.HasPrefix(match, "!")
-		if negated {
-			match = strings.TrimPrefix(match, "!")
-		}
-		matches, err := patternmatcher.MatchesOrParentMatches(rel, []string{match})
+	for _, pattern := range m.patterns {
+		matches, err := pattern.matcher.MatchesOrParentMatches(rel)
 		if err != nil {
-			return Result{}, fmt.Errorf("parse %s:%d: %w", source, pattern.line, err)
+			return Result{}, fmt.Errorf("match %s:%d: %w", m.source, pattern.line, err)
 		}
 		if matches {
 			result.Rule = &Rule{
-				Source:  source,
+				Source:  m.source,
 				Line:    pattern.line,
 				Pattern: pattern.text,
-				Negated: negated,
+				Negated: strings.HasPrefix(pattern.value, "!"),
 			}
 		}
 	}
 
-	excluded, err := patternmatcher.MatchesOrParentMatches(rel, values)
+	excluded, err := m.matcher.MatchesOrParentMatches(rel)
 	if err != nil {
-		return Result{}, fmt.Errorf("match %s: %w", source, err)
+		return Result{}, fmt.Errorf("match %s: %w", m.source, err)
 	}
 	if excluded {
 		result.Status = StatusExcluded
