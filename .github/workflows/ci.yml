@@ -38,3 +38,49 @@ jobs:
         with:
           sensitive: true
           large: true
+
+  action:
+    name: Action behavior
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Run with default inputs
+        uses: ./
+      - name: Create optional finding fixtures
+        run: |
+          touch .env.action-test
+          truncate -s 10M action-large.bin
+      - name: Ignore optional findings by default
+        uses: ./
+      - name: Find sensitive path
+        id: sensitive
+        continue-on-error: true
+        uses: ./
+        with:
+          sensitive: true
+      - name: Find large file
+        id: large
+        continue-on-error: true
+        uses: ./
+        with:
+          large: true
+      - name: Create mismatch fixture
+        run: |
+          echo action-mismatch.txt > .gitignore
+          touch action-mismatch.txt
+      - name: Find context mismatch
+        id: mismatch
+        continue-on-error: true
+        uses: ./
+      - name: Check expected failures
+        if: always()
+        env:
+          SENSITIVE_OUTCOME: ${{ steps.sensitive.outcome }}
+          LARGE_OUTCOME: ${{ steps.large.outcome }}
+          MISMATCH_OUTCOME: ${{ steps.mismatch.outcome }}
+        run: |
+          test "$SENSITIVE_OUTCOME" = failure
+          test "$LARGE_OUTCOME" = failure
+          test "$MISMATCH_OUTCOME" = failure
