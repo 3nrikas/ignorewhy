@@ -13,11 +13,12 @@ import (
 const schemaVersion = 1
 
 type scanReport struct {
-	SchemaVersion  int       `json:"schema_version"`
-	RepositoryRoot string    `json:"repository_root"`
-	FilesScanned   int       `json:"files_scanned"`
-	FindingCount   int       `json:"finding_count"`
-	Findings       []finding `json:"findings"`
+	SchemaVersion  int          `json:"schema_version"`
+	RepositoryRoot string       `json:"repository_root"`
+	Docker         dockerConfig `json:"docker"`
+	FilesScanned   int          `json:"files_scanned"`
+	FindingCount   int          `json:"finding_count"`
+	Findings       []finding    `json:"findings"`
 }
 
 type finding struct {
@@ -26,7 +27,7 @@ type finding struct {
 	Reasons          []scan.Reason `json:"reasons"`
 	SensitivePattern string        `json:"sensitive_pattern,omitempty"`
 	Git              context       `json:"git"`
-	Docker           context       `json:"docker"`
+	Docker           dockerContext `json:"docker"`
 	NPM              npmContext    `json:"npm"`
 }
 
@@ -34,6 +35,18 @@ type context struct {
 	Status string `json:"status"`
 	Rule   *rule  `json:"rule,omitempty"`
 	Reason string `json:"reason,omitempty"`
+}
+
+type dockerConfig struct {
+	ContextRoot  string `json:"context_root"`
+	Dockerfile   string `json:"dockerfile"`
+	IgnoreSource string `json:"ignore_source,omitempty"`
+}
+
+type dockerContext struct {
+	Status    string `json:"status"`
+	InContext bool   `json:"in_context"`
+	Rule      *rule  `json:"rule,omitempty"`
 }
 
 type npmContext struct {
@@ -60,9 +73,14 @@ func WriteJSON(w io.Writer, result scan.Result) error {
 	report := scanReport{
 		SchemaVersion:  schemaVersion,
 		RepositoryRoot: result.Root,
-		FilesScanned:   result.Files,
-		FindingCount:   len(result.Findings),
-		Findings:       make([]finding, len(result.Findings)),
+		Docker: dockerConfig{
+			ContextRoot:  result.Docker.Context,
+			Dockerfile:   result.Docker.Dockerfile,
+			IgnoreSource: result.Docker.IgnoreSource,
+		},
+		FilesScanned: result.Files,
+		FindingCount: len(result.Findings),
+		Findings:     make([]finding, len(result.Findings)),
 	}
 	for i, item := range result.Findings {
 		report.Findings[i] = finding{
@@ -71,7 +89,7 @@ func WriteJSON(w io.Writer, result scan.Result) error {
 			Reasons:          item.Reasons,
 			SensitivePattern: item.SensitivePattern,
 			Git:              gitContext(item.Git),
-			Docker:           dockerContext(item.Docker),
+			Docker:           makeDockerContext(item.Docker),
 			NPM:              makeNPMContext(item.NPM),
 		}
 	}
@@ -95,8 +113,8 @@ func gitContext(result gitcheck.Result) context {
 	return value
 }
 
-func dockerContext(result dockercheck.Result) context {
-	value := context{Status: string(result.Status)}
+func makeDockerContext(result dockercheck.Result) dockerContext {
+	value := dockerContext{Status: string(result.Status), InContext: result.InContext}
 	if result.Rule != nil {
 		value.Rule = &rule{
 			Source:  result.Rule.Source,

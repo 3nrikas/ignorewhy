@@ -28,6 +28,7 @@ const (
 type Options struct {
 	Sensitive bool
 	Large     bool
+	Docker    dockercheck.Options
 }
 
 type Finding struct {
@@ -42,6 +43,7 @@ type Finding struct {
 
 type Result struct {
 	Root     string
+	Docker   dockercheck.Configuration
 	Files    int
 	Findings []Finding
 }
@@ -56,7 +58,7 @@ func RunWithOptions(ctx context.Context, dir string, options Options) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	docker, err := dockercheck.Load(root)
+	docker, err := dockercheck.LoadWithOptions(root, dir, options.Docker)
 	if err != nil {
 		return Result{}, err
 	}
@@ -78,10 +80,10 @@ func RunWithOptions(ctx context.Context, dir string, options Options) (Result, e
 		return Result{}, err
 	}
 
-	result := Result{Root: root, Files: len(files)}
+	result := Result{Root: root, Docker: docker.Configuration(), Files: len(files)}
 	for i, file := range files {
 		path := file.path
-		dockerResult, err := docker.CheckPath(path)
+		dockerResult, err := docker.Check(root, path)
 		if err != nil {
 			return Result{}, err
 		}
@@ -91,7 +93,8 @@ func RunWithOptions(ctx context.Context, dir string, options Options) (Result, e
 		}
 		reasons := mismatchReasons(gitResults[i], dockerResult, npmResult)
 		shipped := gitResults[i].Status == gitcheck.StatusTracked ||
-			dockerResult.Status == dockercheck.StatusIncluded || npmResult.Status == npmcheck.StatusIncluded
+			(dockerResult.InContext && dockerResult.Status == dockercheck.StatusIncluded) ||
+			npmResult.Status == npmcheck.StatusIncluded
 		pattern := ""
 		if options.Sensitive && shipped {
 			pattern = sensitivePattern(path)
@@ -162,14 +165,14 @@ func files(ctx context.Context, root string) ([]file, error) {
 func mismatchReasons(git gitcheck.Result, docker dockercheck.Result, npm npmcheck.Result) []Reason {
 	var reasons []Reason
 	if git.Status == gitcheck.StatusIgnored {
-		if docker.Status == dockercheck.StatusIncluded {
+		if docker.InContext && docker.Status == dockercheck.StatusIncluded {
 			reasons = append(reasons, ReasonGitIgnoredDockerIncluded)
 		}
 		if npm.Status == npmcheck.StatusIncluded {
 			reasons = append(reasons, ReasonGitIgnoredNPMIncluded)
 		}
 	}
-	if docker.Status == dockercheck.StatusExcluded && npm.Status == npmcheck.StatusIncluded {
+	if docker.InContext && docker.Status == dockercheck.StatusExcluded && npm.Status == npmcheck.StatusIncluded {
 		reasons = append(reasons, ReasonDockerExcludedNPMIncluded)
 	}
 	return reasons

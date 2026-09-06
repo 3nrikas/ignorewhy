@@ -27,6 +27,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	help := flags.Bool("help", false, "show help")
 	version := flags.Bool("version", false, "show version")
+	dockerContext := flags.String("docker-context", "", "set Docker build context")
+	dockerfile := flags.String("dockerfile", "", "select Dockerfile")
 	flags.Usage = func() { printUsage(stderr) }
 
 	if err := flags.Parse(args); err != nil {
@@ -51,16 +53,24 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: get working directory: %v\n", err)
 		return 1
 	}
-	return runPath(ctx, dir, flags.Arg(0), stdout, stderr)
+	return runPath(ctx, dir, flags.Arg(0), dockercheck.Options{
+		Context:    *dockerContext,
+		Dockerfile: *dockerfile,
+	}, stdout, stderr)
 }
 
-func runPath(ctx context.Context, dir, path string, stdout, stderr io.Writer) int {
+func runPath(ctx context.Context, dir, path string, dockerOptions dockercheck.Options, stdout, stderr io.Writer) int {
 	gitResult, err := gitcheck.New().Check(ctx, dir, path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	dockerResult, err := dockercheck.Check(gitResult.Root, dir, path)
+	docker, err := dockercheck.LoadWithOptions(gitResult.Root, dir, dockerOptions)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	dockerResult, err := docker.Check(dir, path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -82,6 +92,8 @@ func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	ci := flags.Bool("ci", false, "exit 3 when findings are found")
 	sensitive := flags.Bool("sensitive", false, "find sensitive-looking paths")
 	large := flags.Bool("large", false, "find files at least 10 MiB")
+	dockerContext := flags.String("docker-context", "", "set Docker build context")
+	dockerfile := flags.String("dockerfile", "", "select Dockerfile")
 	help := flags.Bool("help", false, "show help")
 	flags.Usage = func() { printScanUsage(stderr) }
 	if err := flags.Parse(args); err != nil {
@@ -105,6 +117,10 @@ func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	result, err := scan.RunWithOptions(ctx, dir, scan.Options{
 		Sensitive: *sensitive,
 		Large:     *large,
+		Docker: dockercheck.Options{
+			Context:    *dockerContext,
+			Dockerfile: *dockerfile,
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -125,18 +141,21 @@ func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: ignorewhy <path>")
-	fmt.Fprintln(w, "       ignorewhy scan [--json] [--ci] [--sensitive] [--large]")
+	fmt.Fprintln(w, "Usage: ignorewhy [--docker-context PATH] [--dockerfile PATH] <path>")
+	fmt.Fprintln(w, "       ignorewhy scan [--json] [--ci] [--sensitive] [--large] [--docker-context PATH] [--dockerfile PATH]")
 	fmt.Fprintln(w, "       ignorewhy --help")
 	fmt.Fprintln(w, "       ignorewhy --version")
 }
 
 func printScanUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: ignorewhy scan [--json] [--ci] [--sensitive] [--large]")
+	fmt.Fprintln(w, "Usage: ignorewhy scan [--json] [--ci] [--sensitive] [--large] [--docker-context PATH] [--dockerfile PATH]")
 }
 
 func printScan(w io.Writer, result scan.Result, extended bool) {
 	fmt.Fprintf(w, "Scanned %d %s\n", result.Files, noun(result.Files, "file", "files"))
+	if result.Docker.Context != "" && (result.Docker.Context != "." || result.Docker.ExplicitDockerfile) {
+		fmt.Fprintf(w, "Docker: %s\n", dockerConfigurationLabel(result.Docker))
+	}
 	if len(result.Findings) == 0 {
 		if extended {
 			fmt.Fprintln(w, "No findings")
@@ -195,7 +214,7 @@ func printResults(w io.Writer, gitResult gitcheck.Result, dockerResult dockerche
 	if gitResult.Status != gitcheck.StatusIgnored {
 		return
 	}
-	dockerIncluded := dockerResult.Status == dockercheck.StatusIncluded
+	dockerIncluded := dockerResult.InContext && dockerResult.Status == dockercheck.StatusIncluded
 	npmIncluded := npmResult.Status == npmcheck.StatusIncluded
 	switch {
 	case dockerIncluded && npmIncluded:
@@ -228,12 +247,31 @@ func printGit(w io.Writer, result gitcheck.Result) {
 }
 
 func printDocker(w io.Writer, result dockercheck.Result) {
-	fmt.Fprintf(w, "Docker\n  %s\n", result.Status)
+	label := "Docker"
+	if result.Context != "" && (result.Context != "." || result.ExplicitDockerfile) {
+		label += " (" + result.Context
+		if result.ExplicitDockerfile {
+			label += " · " + result.Dockerfile
+		}
+		label += ")"
+	}
+	fmt.Fprintf(w, "%s\n  %s\n", label, result.Status)
+	if !result.InContext && result.Status == dockercheck.StatusOutside {
+		return
+	}
 	if result.Rule != nil {
 		fmt.Fprintf(w, "  %s:%d -> %s\n", result.Rule.Source, result.Rule.Line, result.Rule.Pattern)
 		return
 	}
 	fmt.Fprintln(w, "  no matching ignore rule")
+}
+
+func dockerConfigurationLabel(config dockercheck.Configuration) string {
+	label := config.Context
+	if config.ExplicitDockerfile {
+		label += " · " + config.Dockerfile
+	}
+	return label
 }
 
 func printNPM(w io.Writer, result npmcheck.Result) {
