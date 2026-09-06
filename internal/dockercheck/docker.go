@@ -18,6 +18,7 @@ type Status string
 const (
 	StatusIncluded Status = "INCLUDED"
 	StatusExcluded Status = "EXCLUDED"
+	StatusOutside  Status = "OUTSIDE BUILD CONTEXT"
 )
 
 type Rule struct {
@@ -28,9 +29,14 @@ type Rule struct {
 }
 
 type Result struct {
-	Root   string
-	Status Status
-	Rule   *Rule
+	Root               string
+	Context            string
+	Dockerfile         string
+	IgnoreSource       string
+	ExplicitDockerfile bool
+	InContext          bool
+	Status             Status
+	Rule               *Rule
 }
 
 type pattern struct {
@@ -41,22 +47,58 @@ type pattern struct {
 }
 
 type Matcher struct {
-	root     string
-	source   string
-	patterns []pattern
-	matcher  *patternmatcher.PatternMatcher
+	repoRoot           string
+	root               string
+	context            string
+	dockerfile         string
+	source             string
+	explicitDockerfile bool
+	patterns           []pattern
+	matcher            *patternmatcher.PatternMatcher
 }
 
 func Load(root string) (Matcher, error) {
+	return LoadWithOptions(root, root, Options{})
+}
+
+func LoadWithOptions(root, dir string, options Options) (Matcher, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return Matcher{}, fmt.Errorf("resolve Docker context: %w", err)
+		return Matcher{}, fmt.Errorf("resolve Git repository root: %w", err)
 	}
-	patterns, source, err := readPatterns(root)
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		return Matcher{}, fmt.Errorf("resolve working directory: %w", err)
+	}
+	contextRoot, err := resolveContext(root, dir, options.Context)
 	if err != nil {
 		return Matcher{}, err
 	}
-	matcher := Matcher{root: root, source: source, patterns: patterns}
+	dockerfile, explicitDockerfile, err := resolveDockerfile(root, dir, contextRoot, options.Dockerfile)
+	if err != nil {
+		return Matcher{}, err
+	}
+	context, err := relativePath(root, contextRoot)
+	if err != nil {
+		return Matcher{}, fmt.Errorf("resolve Docker context relative to repository: %w", err)
+	}
+	dockerfilePath, err := relativePath(root, dockerfile)
+	if err != nil {
+		return Matcher{}, fmt.Errorf("resolve Dockerfile relative to repository: %w", err)
+	}
+	patterns, source, err := readPatterns(root, contextRoot, dockerfile)
+	if err != nil {
+		return Matcher{}, err
+	}
+	matcher := Matcher{
+		repoRoot:           root,
+		root:               contextRoot,
+		context:            context,
+		dockerfile:         dockerfilePath,
+		source:             source,
+		explicitDockerfile: explicitDockerfile,
+		patterns:           patterns,
+	}
 	if len(patterns) == 0 {
 		return matcher, nil
 	}
@@ -78,11 +120,20 @@ func Load(root string) (Matcher, error) {
 }
 
 func Check(root, dir, path string) (Result, error) {
-	matcher, err := Load(root)
+	matcher, err := LoadWithOptions(root, dir, Options{})
 	if err != nil {
 		return Result{}, err
 	}
 	return matcher.Check(dir, path)
+}
+
+func (m Matcher) Configuration() Configuration {
+	return Configuration{
+		Context:            m.context,
+		Dockerfile:         m.dockerfile,
+		IgnoreSource:       m.source,
+		ExplicitDockerfile: m.explicitDockerfile,
+	}
 }
 
 func (m Matcher) Check(dir, path string) (Result, error) {
@@ -100,19 +151,26 @@ func (m Matcher) Check(dir, path string) (Result, error) {
 		return Result{}, fmt.Errorf("resolve path relative to Docker context: %w", err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return Result{}, fmt.Errorf("path %q is outside Docker context %q", path, m.root)
+		repoPath, repoErr := filepath.Rel(m.repoRoot, filepath.Clean(full))
+		if repoErr != nil {
+			return Result{}, fmt.Errorf("resolve path relative to Git repository: %w", repoErr)
+		}
+		if outside(repoPath) {
+			return Result{}, fmt.Errorf("path %q is outside Git repository %q", path, m.repoRoot)
+		}
+		return m.result(StatusOutside, false), nil
 	}
 	return m.CheckPath(filepath.ToSlash(rel))
 }
 
 func (m Matcher) CheckPath(path string) (Result, error) {
 	rel := filepath.Clean(filepath.FromSlash(path))
-	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if filepath.IsAbs(rel) || outside(rel) {
 		return Result{}, fmt.Errorf("path %q is not relative to Docker context %q", path, m.root)
 	}
 	rel = filepath.ToSlash(rel)
-	result := Result{Root: m.root, Status: StatusIncluded}
-	if len(m.patterns) == 0 {
+	result := m.result(StatusIncluded, true)
+	if rel == "." || len(m.patterns) == 0 {
 		return result, nil
 	}
 
@@ -141,33 +199,57 @@ func (m Matcher) CheckPath(path string) (Result, error) {
 	return result, nil
 }
 
-func readPatterns(root string) ([]pattern, string, error) {
-	for _, name := range []string{"Dockerfile.dockerignore", ".dockerignore"} {
-		data, err := os.ReadFile(filepath.Join(root, name))
+func (m Matcher) result(status Status, inContext bool) Result {
+	return Result{
+		Root:               m.root,
+		Context:            m.context,
+		Dockerfile:         m.dockerfile,
+		IgnoreSource:       m.source,
+		ExplicitDockerfile: m.explicitDockerfile,
+		InContext:          inContext,
+		Status:             status,
+	}
+}
+
+func readPatterns(root, contextRoot, dockerfile string) ([]pattern, string, error) {
+	files := []string{dockerfile + ".dockerignore", filepath.Join(contextRoot, ".dockerignore")}
+	for _, path := range files {
+		_, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, "", fmt.Errorf("read %s: %w", name, err)
+			return nil, "", fmt.Errorf("inspect Docker ignore file: %w", err)
+		}
+		if err := checkResolvedPath(root, path); err != nil {
+			return nil, "", fmt.Errorf("resolve Docker ignore file: %w", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, "", fmt.Errorf("read Docker ignore file: %w", err)
+		}
+		source, err := relativePath(root, path)
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve Docker ignore file relative to repository: %w", err)
 		}
 
 		values, err := ignorefile.ReadAll(bytes.NewReader(data))
 		if err != nil {
-			return nil, "", fmt.Errorf("read %s: %w", name, err)
+			return nil, "", fmt.Errorf("read %s: %w", source, err)
 		}
 		lines, err := patternLines(data)
 		if err != nil {
-			return nil, "", fmt.Errorf("read %s: %w", name, err)
+			return nil, "", fmt.Errorf("read %s: %w", source, err)
 		}
 		if len(values) != len(lines) {
-			return nil, "", fmt.Errorf("read %s: pattern count mismatch", name)
+			return nil, "", fmt.Errorf("read %s: pattern count mismatch", source)
 		}
 
 		patterns := make([]pattern, len(values))
 		for i := range values {
 			patterns[i] = pattern{value: values[i], text: lines[i].text, line: lines[i].line}
 		}
-		return patterns, name, nil
+		return patterns, source, nil
 	}
 	return nil, "", nil
 }
