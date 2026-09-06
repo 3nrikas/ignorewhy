@@ -80,6 +80,15 @@ checks can be enabled when needed:
     large: true
 ```
 
+Custom Docker builds can use the same paths as the CLI:
+
+```yaml
+- uses: 3nrikas/ignorewhy@main
+  with:
+    docker-context: apps/api
+    dockerfile: docker/api.Dockerfile
+```
+
 <img src="assets/usage.png" height="64" alt="Usage">
 
 Run it from anywhere inside a Git repository:
@@ -90,6 +99,8 @@ ignorewhy scan --json
 ignorewhy scan --ci
 ignorewhy scan --sensitive
 ignorewhy scan --large
+ignorewhy scan --docker-context apps/api --dockerfile docker/api.Dockerfile
+ignorewhy --docker-context apps/api apps/api/path/to/file
 ignorewhy path/to/file
 ignorewhy --help
 ignorewhy --version
@@ -104,13 +115,18 @@ success even when it finds mismatches.
 `dump.sql` without reading file contents. `scan --large` finds shipped files of
 10 MiB or more. Both flags can be combined with `--json` and `--ci`.
 
+Docker paths are resolved from the directory where `ignorewhy` is run. Use
+`--docker-context` to select a context inside the repository and `--dockerfile`
+to select a Dockerfile, including one outside that context.
+
 <img src="assets/features.png" height="64" alt="Features">
 
 - Explains Git ignore matches, including the source file and line number.
 - Distinguishes tracked files from untracked files that Git ignores.
 - Uses Moby-compatible `.dockerignore` matching, including negation and rule
   order.
-- Supports `Dockerfile.dockerignore` for the default Dockerfile.
+- Supports custom Docker build contexts and Dockerfiles.
+- Uses Dockerfile-specific ignore files when present.
 - Uses `npm pack` to follow real npm package inclusion rules.
 - Disables npm lifecycle scripts and runs npm analysis offline.
 - Scans a repository for cross-context mismatches in one command.
@@ -128,10 +144,10 @@ success even when it finds mismatches.
 | Docker | Moby's `patternmatcher` |
 | npm | `npm pack --dry-run --ignore-scripts --offline` |
 
-The Git repository root is used as the Docker build context and as the root npm
+The Git repository root is the default Docker build context and the root npm
 package. npm workspaces declared in the root `package.json` are discovered
 automatically from array or `workspaces.packages` declarations, including common
-`*` and `**` patterns. Custom Docker build contexts are not supported yet.
+`*` and `**` patterns. One Docker build context is analyzed at a time.
 
 <img src="assets/license.png" height="64" alt="License">
 
