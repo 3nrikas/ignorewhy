@@ -74,13 +74,34 @@ jobs:
         id: mismatch
         continue-on-error: true
         uses: ./
+      - name: Create custom Docker context fixture
+        run: |
+          mkdir -p "action fixtures/context dir" "action fixtures/docker files"
+          touch "action fixtures/context dir/secret.txt"
+          printf '%s\n' "action fixtures/context dir/secret.txt" >> .gitignore
+          printf '%s\n' "secret.txt" > "action fixtures/context dir/.dockerignore"
+          touch "action fixtures/docker files/api.Dockerfile"
+          printf '%s\n' "different.txt" > "action fixtures/docker files/api.Dockerfile.dockerignore"
+      - name: Use custom Docker context
+        uses: ./
+        with:
+          docker-context: action fixtures/context dir
+      - name: Use Dockerfile-specific ignore rules
+        id: dockerfile
+        continue-on-error: true
+        uses: ./
+        with:
+          docker-context: action fixtures/context dir
+          dockerfile: action fixtures/docker files/api.Dockerfile
       - name: Check expected failures
         if: always()
         env:
           SENSITIVE_OUTCOME: ${{ steps.sensitive.outcome }}
           LARGE_OUTCOME: ${{ steps.large.outcome }}
           MISMATCH_OUTCOME: ${{ steps.mismatch.outcome }}
+          DOCKERFILE_OUTCOME: ${{ steps.dockerfile.outcome }}
         run: |
           test "$SENSITIVE_OUTCOME" = failure
           test "$LARGE_OUTCOME" = failure
           test "$MISMATCH_OUTCOME" = failure
+          test "$DOCKERFILE_OUTCOME" = failure
