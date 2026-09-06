@@ -11,6 +11,14 @@ inputs:
     description: Check for shipped files of at least 10 MiB
     required: false
     default: "false"
+  docker-context:
+    description: Docker build context, relative to the checkout working directory
+    required: false
+    default: ""
+  dockerfile:
+    description: Dockerfile path, relative to the checkout working directory
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -27,6 +35,8 @@ runs:
         IGNOREWHY_ACTION_REF: ${{ github.action_ref }}
         IGNOREWHY_SENSITIVE: ${{ inputs.sensitive }}
         IGNOREWHY_LARGE: ${{ inputs.large }}
+        IGNOREWHY_DOCKER_CONTEXT: ${{ inputs.docker-context }}
+        IGNOREWHY_DOCKERFILE: ${{ inputs.dockerfile }}
         CGO_ENABLED: "0"
       run: |
         $sensitive = "$env:IGNOREWHY_SENSITIVE".ToLowerInvariant()
@@ -60,6 +70,12 @@ runs:
         }
         if ($large -eq "true") {
           $arguments += "--large"
+        }
+        if (![string]::IsNullOrWhiteSpace($env:IGNOREWHY_DOCKER_CONTEXT)) {
+          $arguments += @("--docker-context", $env:IGNOREWHY_DOCKER_CONTEXT)
+        }
+        if (![string]::IsNullOrWhiteSpace($env:IGNOREWHY_DOCKERFILE)) {
+          $arguments += @("--dockerfile", $env:IGNOREWHY_DOCKERFILE)
         }
         & $binary @arguments
         exit $LASTEXITCODE
